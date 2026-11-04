@@ -56,6 +56,7 @@ describe("Kanbanity", () => {
   beforeEach(() => {
     localStorage.clear();
     persistedDatabaseState = null;
+    let generatedId = 0;
     vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "PUT") {
         const body = JSON.parse(String(init.body)) as { state: TestPersistedState };
@@ -64,7 +65,15 @@ describe("Kanbanity", () => {
       }
       return apiResponse({ state: persistedDatabaseState, updatedAt: null });
     }));
-    vi.stubGlobal("crypto", { ...crypto, randomUUID: vi.fn(() => "test-id") });
+    vi.stubGlobal("crypto", {
+      ...crypto,
+      randomUUID: vi.fn(() => "test-id"),
+      getRandomValues: vi.fn((bytes: Uint8Array) => {
+        bytes.fill(0);
+        bytes[15] = ++generatedId;
+        return bytes;
+      }),
+    });
   });
 
   afterEach(() => {
