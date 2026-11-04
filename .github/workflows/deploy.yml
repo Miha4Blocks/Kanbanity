@@ -1,0 +1,24 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            cd /opt/kanbanity
+            git pull origin main
+            sudo -u kanbanity npm install
+            sudo -u kanbanity env NODE_OPTIONS="--max-old-space-size=2048" npm run build
+            sudo systemctl restart kanbanity
+            sleep 3
+            curl -f http://127.0.0.1:3001/api/health && echo "Deploy OK"
