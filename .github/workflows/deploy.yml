@@ -17,8 +17,8 @@ jobs:
           script: |
             cd /opt/kanbanity
             git pull origin main
-            sudo -u kanbanity npm install
-            sudo -u kanbanity env NODE_OPTIONS="--max-old-space-size=2048" npm run build
+            npm install
+            env NODE_OPTIONS="--max-old-space-size=2048" npm run build
             sudo systemctl restart kanbanity
             sleep 3
             curl -f http://127.0.0.1:3001/api/health && echo "Deploy OK"
