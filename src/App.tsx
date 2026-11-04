@@ -314,6 +314,16 @@ function formatTaskCount(count: number) {
   return `${count} ${noun}`;
 }
 
+function createId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function App() {
   const [activeProjectId, setActiveProjectId] = useState("redesign");
   const [projects, setProjects] = useState<Project[]>(initialProjects);
@@ -544,7 +554,7 @@ function App() {
     ];
     const appearance = palette[projects.length % palette.length];
     const project: Project = {
-      id: crypto.randomUUID(),
+      id: createId(),
       name,
       description,
       schedule: "Без срока",
@@ -608,7 +618,7 @@ function App() {
   }
 
   function addActivity(message: string) {
-    setActivity((current) => [{ id: crypto.randomUUID(), message, time: "только что" }, ...current].slice(0, 8));
+    setActivity((current) => [{ id: createId(), message, time: "только что" }, ...current].slice(0, 8));
   }
 
   function findTaskColumn(taskId: string) {
@@ -709,7 +719,7 @@ function App() {
   function addColumn() {
     const title = window.prompt("Название новой колонки", "Новая колонка")?.trim();
     if (!title) return;
-    const column = { id: `column-${crypto.randomUUID()}`, title, accent: "#7b72e9" };
+    const column = { id: `column-${createId()}`, title, accent: "#7b72e9" };
     updateColumns((current) => [...current, column]);
     updateTasks((current) => ({ ...current, [column.id]: [] }));
     addActivity(`Добавлена колонка «${title}»`);
@@ -752,7 +762,7 @@ function App() {
   function addComment(taskId: string, text: string) {
     const sourceColumnId = findTaskColumn(taskId);
     if (!sourceColumnId || !text.trim()) return;
-    const comment = { id: crypto.randomUUID(), author: "Вы", text: text.trim(), createdAt: "только что" };
+    const comment = { id: createId(), author: "Вы", text: text.trim(), createdAt: "только что" };
     updateTasks((current) => ({
       ...current,
       [sourceColumnId]: current[sourceColumnId].map((task) =>
