@@ -51,6 +51,7 @@ type Project = { id: string; name: string; icon: string; color: string; descript
 type ProjectBoard = { columns: Column[]; tasksByColumn: Record<string, Task[]> };
 type WorkspaceSettings = { name: string; description: string };
 type PersistedAppState = {
+  projects?: Project[];
   boardsByProject: Record<string, ProjectBoard>;
   workspaceSettings: WorkspaceSettings;
   activity: ActivityItem[];
@@ -190,7 +191,7 @@ const initialActivity: ActivityItem[] = [
   { id: "a3", message: "Александра добавила комментарий к KAN-18", time: "2 часа назад" },
 ];
 
-const projects: Project[] = [
+const initialProjects: Project[] = [
   { id: "redesign", name: "Редизайн платформы", icon: "✳", color: "purple", description: "Создаём новый опыт для наших пользователей", schedule: "21 окт — 18 ноя, 2026", prefix: "KAN" },
   { id: "mobile", name: "Мобильное приложение", icon: "◈", color: "orange", description: "Запускаем удобное мобильное приложение", schedule: "3 ноя — 15 дек, 2026", prefix: "MOB" },
   { id: "content", name: "Контент-маркетинг", icon: "◌", color: "blue", description: "Планируем и создаём полезный контент", schedule: "1 ноя — 30 ноя, 2026", prefix: "CNT" },
@@ -259,6 +260,13 @@ function createInitialBoards(): Record<string, ProjectBoard> {
   };
 }
 
+function createEmptyProjectBoard(): ProjectBoard {
+  return {
+    columns: initialColumns.map((column) => ({ ...column })),
+    tasksByColumn: Object.fromEntries(initialColumns.map((column) => [column.id, []])),
+  };
+}
+
 const priorityMeta: Record<Priority, { className: string; icon: typeof Flag }> = {
   Срочно: { className: "urgent", icon: AlertCircle },
   Высокий: { className: "high", icon: ArrowUp },
@@ -293,8 +301,22 @@ function formatDueDate(value: string) {
   return new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" }).format(date).replace(".", "");
 }
 
+function formatTaskCount(count: number) {
+  const lastTwoDigits = count % 100;
+  const lastDigit = count % 10;
+  const noun = lastTwoDigits >= 11 && lastTwoDigits <= 14
+    ? "задач"
+    : lastDigit === 1
+      ? "задачу"
+      : lastDigit >= 2 && lastDigit <= 4
+        ? "задачи"
+        : "задач";
+  return `${count} ${noun}`;
+}
+
 function App() {
   const [activeProjectId, setActiveProjectId] = useState("redesign");
+  const [projects, setProjects] = useState<Project[]>(initialProjects);
   const [boardsByProject, setBoardsByProject] = useState<Record<string, ProjectBoard>>(() =>
     readStorage(projectBoardsKey, createInitialBoards()),
   );
@@ -324,8 +346,10 @@ function App() {
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [modalTask, setModalTask] = useState<Task | null>(null);
   const [modalColumnId, setModalColumnId] = useState<string | null>(null);
+  const [showCreateProject, setShowCreateProject] = useState(false);
   const [toast, setToast] = useState("");
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+  const [expandedTaskLists, setExpandedTaskLists] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
     let active = true;
@@ -342,6 +366,7 @@ function App() {
 
         if (!state) {
           state = {
+            projects: initialProjects,
             boardsByProject: readStorage(projectBoardsKey, createInitialBoards()),
             workspaceSettings: readStorage(workspaceSettingsKey, { name: "Studio North", description: "Рабочее пространство" }),
             activity: readStorage(storageKeys.activity, initialActivity),
@@ -356,6 +381,8 @@ function App() {
         }
 
         if (!active) return;
+        const loadedProjects = state.projects ?? initialProjects;
+        setProjects(loadedProjects);
         setBoardsByProject(state.boardsByProject);
         setWorkspaceSettings(state.workspaceSettings);
         setActivity(state.activity);
@@ -379,7 +406,7 @@ function App() {
   useEffect(() => {
     if (!databaseReady) return;
     let active = true;
-    const state: PersistedAppState = { boardsByProject, workspaceSettings, activity, readNotificationIds };
+    const state: PersistedAppState = { projects, boardsByProject, workspaceSettings, activity, readNotificationIds };
     const timer = window.setTimeout(async () => {
       setDatabaseStatus("saving");
       try {
@@ -404,7 +431,7 @@ function App() {
       active = false;
       window.clearTimeout(timer);
     };
-  }, [databaseReady, boardsByProject, workspaceSettings, activity, readNotificationIds, databaseRetry]);
+  }, [databaseReady, projects, boardsByProject, workspaceSettings, activity, readNotificationIds, databaseRetry]);
 
   useEffect(() => {
     localStorage.setItem(storageKeys.readNotifications, JSON.stringify(readNotificationIds));
@@ -484,6 +511,60 @@ function App() {
     setModalTask(null);
     setModalColumnId(null);
     setShowFilters(false);
+  }
+
+  function createProject(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const name = String(formData.get("projectName") ?? "").trim();
+    const description = String(formData.get("projectDescription") ?? "").trim();
+    if (!name) {
+      setToast("Введите название проекта");
+      return;
+    }
+
+    const basePrefix = name
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, "")
+      .slice(0, 4) || "PRJ";
+    const usedPrefixes = new Set(projects.map((project) => project.prefix));
+    let prefix = basePrefix;
+    let suffix = 2;
+    while (usedPrefixes.has(prefix)) {
+      prefix = `${basePrefix}${suffix}`;
+      suffix += 1;
+    }
+
+    const palette = [
+      { icon: "✳", color: "purple" },
+      { icon: "◈", color: "orange" },
+      { icon: "◌", color: "blue" },
+    ];
+    const appearance = palette[projects.length % palette.length];
+    const project: Project = {
+      id: crypto.randomUUID(),
+      name,
+      description,
+      schedule: "Без срока",
+      prefix,
+      ...appearance,
+    };
+
+    setProjects((current) => [...current, project]);
+    setBoardsByProject((current) => ({ ...current, [project.id]: createEmptyProjectBoard() }));
+    setActiveProjectId(project.id);
+    setActiveNav("Доска проекта");
+    setActiveView("Доска");
+    setQuery("");
+    setPriorityFilter("Все приоритеты");
+    setAssigneeFilter("Все исполнители");
+    setLabelFilter("Все метки");
+    setShowFilters(false);
+    setShowCreateProject(false);
+    addActivity(`Создан проект «${name}»`);
+    setToast("Проект создан");
   }
 
   function openWorkspacePage(page: "Обзор" | "Проекты" | "Команда") {
@@ -718,7 +799,7 @@ function App() {
           <NavButton icon={<Activity size={17} />} label="Активность" active={activeNav === "Активность"} onClick={() => setShowActivity((value) => !value)} />
         </div>
         <div className="side-section projects-section">
-          <div className="side-section-title">Ваши проекты <button className="icon-button tiny" aria-label="Все проекты" onClick={() => openWorkspacePage("Проекты")}><Plus size={16} /></button></div>
+          <div className="side-section-title">Ваши проекты <button className="icon-button tiny" aria-label="Создать проект" onClick={() => setShowCreateProject(true)}><Plus size={16} /></button></div>
           {projects.map((project) => <button key={project.id} className={activeNav === "Доска проекта" && activeProjectId === project.id ? "project-link selected" : "project-link"} onClick={() => openProject(project.id)}><span className={`project-dot ${project.color}`}>{project.icon}</span><span>{project.name}</span>{activeProjectId === project.id && <MoreHorizontal size={15} />}</button>)}
         </div>
         <div className="sidebar-bottom">
@@ -767,6 +848,7 @@ function App() {
               projects={projects}
               boards={boardsByProject}
               onOpenProject={openProject}
+              onCreateProject={() => setShowCreateProject(true)}
               onOpenSettings={() => setShowWorkspaceSettings(true)}
               onInvite={() => setToast("Ссылка-приглашение скопирована")}
             />
@@ -837,10 +919,13 @@ function App() {
             <section className="board-scroll" aria-label="Канбан-доска">
               <div className="board-columns">
                 {columns.map((column) => {
+                  const taskListKey = `${activeProjectId}:${column.id}`;
+                  const isTaskListExpanded = expandedTaskLists.has(taskListKey);
                   const tasks = sortTasks((tasksByColumn[column.id] ?? []).filter((task) => {
                     const searchMatches = `${task.id} ${task.title} ${task.description} ${task.labels.join(" ")}`.toLocaleLowerCase("ru").includes(query.trim().toLocaleLowerCase("ru"));
                     return searchMatches && (priorityFilter === "Все приоритеты" || task.priority === priorityFilter) && (assigneeFilter === "Все исполнители" || task.assignee === assigneeFilter) && (labelFilter === "Все метки" || task.labels.includes(labelFilter));
                   }));
+                  const visibleTasks = isTaskListExpanded ? tasks : tasks.slice(0, 4);
                   const isOverLimit = !!column.limit && (tasksByColumn[column.id]?.length ?? 0) > column.limit;
                   return (
                     <div className="board-column" key={column.id} onDragOver={(event) => event.preventDefault()} onDrop={(event) => handleDrop(event, column.id)}>
@@ -849,8 +934,14 @@ function App() {
                         <div className="column-controls"><button className="icon-button tiny" aria-label={`Настройки колонки ${column.title}`} onClick={() => manageColumn(column)}><MoreHorizontal size={17} /></button></div>
                       </div>
                       <div className={`task-list ${draggedTaskId ? "drop-ready" : ""}`}>
-                        {tasks.map((task) => <TaskCard key={task.id} task={task} onOpen={() => { setModalColumnId(column.id); setModalTask(task); }} onDragStart={(event) => { event.dataTransfer.setData("text/plain", task.id); event.dataTransfer.effectAllowed = "move"; setDraggedTaskId(task.id); }} onDragEnd={() => setDraggedTaskId(null)} />)}
+                        {visibleTasks.map((task) => <TaskCard key={task.id} task={task} onOpen={() => { setModalColumnId(column.id); setModalTask(task); }} onDragStart={(event) => { event.dataTransfer.setData("text/plain", task.id); event.dataTransfer.effectAllowed = "move"; setDraggedTaskId(task.id); }} onDragEnd={() => setDraggedTaskId(null)} />)}
                         {tasks.length === 0 && <div className="empty-column">{isEmptyFilter ? "Нет задач по выбранным фильтрам" : "Перетащите задачу сюда"}</div>}
+                        {tasks.length > 4 && <button className="task-list-toggle" aria-expanded={isTaskListExpanded} onClick={() => setExpandedTaskLists((current) => {
+                          const next = new Set(current);
+                          if (isTaskListExpanded) next.delete(taskListKey);
+                          else next.add(taskListKey);
+                          return next;
+                        })}>{isTaskListExpanded ? "Свернуть" : `Показать ещё ${formatTaskCount(tasks.length - 4)}`}</button>}
                       </div>
                     </div>
                   );
@@ -879,6 +970,7 @@ function App() {
       {showActivity && <><button className="drawer-backdrop" aria-label="Закрыть активность" onClick={() => setShowActivity(false)} /><aside className="activity-drawer"><div className="drawer-header"><div><span className="eyebrow">ОБНОВЛЕНИЯ</span><h2>Активность</h2></div><button className="icon-button" aria-label="Закрыть" onClick={() => setShowActivity(false)}><X size={18} /></button></div><div className="activity-feed">{activity.map((item, index) => <div className="feed-item" key={item.id}><span className={`activity-icon activity-icon-${index % 3}`}><Activity size={15} /></span><div><p>{item.message}</p><small>{item.time}</small></div></div>)}</div><button className="drawer-link" onClick={() => { setActiveNav("Доска проекта"); setActiveView("Активность"); setShowActivity(false); }}>Вся активность <ChevronRight size={15} /></button></aside></>}
 
       {showWorkspaceSettings && <WorkspaceSettingsModal settings={workspaceSettings} onClose={() => setShowWorkspaceSettings(false)} onSave={saveWorkspaceSettings} />}
+      {showCreateProject && <CreateProjectModal onClose={() => setShowCreateProject(false)} onSave={createProject} />}
       {modalTask && activeNav === "Доска проекта" && <TaskModal key={modalTask.id || "new"} task={modalTask} columns={columns} initialColumnId={modalColumnId ?? columns[0]?.id ?? ""} onClose={() => { setModalTask(null); setModalColumnId(null); }} onSave={saveTask} onDelete={modalTask.id ? () => removeTask(modalTask.id) : undefined} onAddComment={addComment} />}
       {toast && <div className="toast"><Check size={16} />{toast}<button aria-label="Закрыть уведомление" onClick={() => setToast("")}><X size={14} /></button></div>}
     </div>
@@ -889,11 +981,12 @@ function NavButton({ icon, label, active = false, onClick }: { icon: React.React
   return <button className={active ? "nav-button active" : "nav-button"} onClick={onClick}>{icon}<span>{label}</span></button>;
 }
 
-function WorkspacePage({ page, projects: projectList, boards, onOpenProject, onOpenSettings, onInvite }: {
+function WorkspacePage({ page, projects: projectList, boards, onOpenProject, onCreateProject, onOpenSettings, onInvite }: {
   page: string;
   projects: Project[];
   boards: Record<string, ProjectBoard>;
   onOpenProject: (projectId: string) => void;
+  onCreateProject: () => void;
   onOpenSettings: () => void;
   onInvite: () => void;
 }) {
@@ -932,7 +1025,7 @@ function WorkspacePage({ page, projects: projectList, boards, onOpenProject, onO
           <h1>{page === "Проекты" ? "Проекты" : "Обзор"}</h1>
           <p>{page === "Проекты" ? "Все проекты и их текущий прогресс." : "Краткая сводка по проектам и задачам команды."}</p>
         </div>
-        {page === "Обзор" && <button className="toolbar-button" onClick={onOpenSettings}><Settings2 size={15} /> Настройки пространства</button>}
+        {page === "Проекты" ? <button className="invite-button" onClick={onCreateProject}><Plus size={15} /> Создать проект</button> : <button className="toolbar-button" onClick={onOpenSettings}><Settings2 size={15} /> Настройки пространства</button>}
       </div>
       {page === "Обзор" && (
         <div className="overview-stats">
@@ -957,6 +1050,24 @@ function WorkspacePage({ page, projects: projectList, boards, onOpenProject, onO
         })}
       </div>
     </section>
+  );
+}
+
+function CreateProjectModal({ onClose, onSave }: {
+  onClose: () => void;
+  onSave: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <form className="task-modal create-project-modal" role="dialog" aria-modal="true" aria-labelledby="create-project-title" onSubmit={onSave}>
+        <div className="modal-top"><span className="modal-kicker">НОВЫЙ ПРОЕКТ</span><button className="icon-button" type="button" aria-label="Закрыть" onClick={onClose}><X size={18} /></button></div>
+        <h2 id="create-project-title">Создать проект</h2>
+        <p>Новая доска появится в списке ваших проектов.</p>
+        <label className="settings-field"><span>Название проекта</span><input name="projectName" placeholder="Например, Запуск продукта" maxLength={60} required autoFocus /></label>
+        <label className="settings-field"><span>Описание <small>необязательно</small></span><textarea name="projectDescription" placeholder="Чем займётся команда в этом проекте?" rows={3} maxLength={160} /></label>
+        <div className="modal-footer"><span className="modal-hint">Доска будет создана с пустыми колонками.</span><div><button className="cancel-button" type="button" onClick={onClose}>Отмена</button><button className="save-button" type="submit">Создать проект</button></div></div>
+      </form>
+    </div>
   );
 }
 
