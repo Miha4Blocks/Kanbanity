@@ -127,8 +127,12 @@ async function serveStaticFile(requestPath, response) {
     const fileInfo = await stat(candidate);
     if (!fileInfo.isFile()) return false;
     const contents = await readFile(candidate);
+    const isHtml = extname(candidate) === ".html";
     response.writeHead(200, {
-      "Cache-Control": extname(candidate) === ".html" ? "no-cache" : "public, max-age=31536000, immutable",
+      "Cache-Control": isHtml
+        ? "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0"
+        : "public, max-age=31536000, immutable",
+      ...(isHtml ? { Expires: "0", Pragma: "no-cache" } : {}),
       "Content-Type": mimeTypes[extname(candidate)] ?? "application/octet-stream",
       "X-Content-Type-Options": "nosniff",
     });
