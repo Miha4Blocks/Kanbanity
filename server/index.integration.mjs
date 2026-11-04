@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -53,32 +54,82 @@ async function stopServer(child) {
   await Promise.race([exit, delay(3000)]);
 }
 
-test("SQLite API сохраняет состояние после перезапуска и отклоняет некорректные данные", async () => {
+test("авторизация изолирует состояние аккаунтов и сохраняет сессии после перезапуска", async () => {
   const tempDirectory = await mkdtemp(join(tmpdir(), "kanbanity-sqlite-test-"));
   const databasePath = join(tempDirectory, "kanbanity.sqlite");
   const port = await findAvailablePort();
-  let server = await startServer(databasePath, port);
-
-  const state = {
+  const legacyState = {
     projects: [{
-      id: "redesign",
-      name: "Редизайн платформы",
+      id: "legacy-project",
+      name: "Старый проект",
       icon: "✳",
       color: "purple",
-      description: "Новый опыт для пользователей",
+      description: "Перенос старых данных",
       schedule: "Без срока",
-      prefix: "RED",
+      prefix: "OLD",
     }],
     boardsByProject: {
-      redesign: {
+      "legacy-project": {
+        columns: [{ id: "todo", title: "К выполнению" }],
+        tasksByColumn: { todo: [{ id: "OLD-1", title: "Старая задача" }] },
+      },
+    },
+    workspaceSettings: { name: "Старое пространство", description: "Старые данные" },
+    activity: [{ id: "activity-1", message: "Создана задача", time: "сейчас" }],
+    readNotificationIds: [],
+  };
+  const legacyDatabase = new DatabaseSync(databasePath);
+  legacyDatabase.exec(`
+    CREATE TABLE app_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      state_json TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  legacyDatabase.prepare("INSERT INTO app_state (id, state_json) VALUES (1, ?)").run(JSON.stringify(legacyState));
+  legacyDatabase.close();
+  let server = await startServer(databasePath, port);
+
+  const userAState = {
+    projects: [{
+      id: "a-project",
+      name: "Проект пользователя A",
+      icon: "◈",
+      color: "purple",
+      description: "Приватная доска A",
+      schedule: "Без срока",
+      prefix: "USR",
+    }],
+    boardsByProject: {
+      "a-project": {
         columns: [{ id: "todo", title: "К выполнению" }],
         tasksByColumn: {
-          todo: [{ id: "KAN-1", title: "Сохранённая задача" }],
+          todo: [{ id: "USR-1", title: "Задача A" }],
         },
       },
     },
-    workspaceSettings: { name: "Kanbanity QA", description: "Тест базы" },
-    activity: [{ id: "activity-1", message: "Создана задача", time: "сейчас" }],
+    workspaceSettings: { name: "Пространство A", description: "Приватное A" },
+    activity: [{ id: "activity-a", message: "Создана задача A", time: "сейчас" }],
+    readNotificationIds: [],
+  };
+  const userBState = {
+    projects: [{
+      id: "b-project",
+      name: "Проект пользователя B",
+      icon: "◌",
+      color: "blue",
+      description: "Приватная доска B",
+      schedule: "Без срока",
+      prefix: "USR",
+    }],
+    boardsByProject: {
+      "b-project": {
+        columns: [{ id: "todo", title: "К выполнению" }],
+        tasksByColumn: { todo: [{ id: "USR-1", title: "Задача B" }] },
+      },
+    },
+    workspaceSettings: { name: "Пространство B", description: "Приватное B" },
+    activity: [{ id: "activity-b", message: "Создана задача B", time: "сейчас" }],
     readNotificationIds: [],
   };
 
@@ -89,33 +140,102 @@ test("SQLite API сохраняет состояние после перезап
     assert.equal(pageResponse.headers.get("pragma"), "no-cache");
     assert.equal(pageResponse.headers.get("expires"), "0");
 
-    const emptyResponse = await fetch(`${server.baseUrl}/api/state`);
-    assert.equal(emptyResponse.status, 200);
-    assert.equal((await emptyResponse.json()).state, null);
+    const anonymousSession = await fetch(`${server.baseUrl}/api/auth/session`);
+    assert.deepEqual(await anonymousSession.json(), { user: null });
+    const anonymousState = await fetch(`${server.baseUrl}/api/state`);
+    assert.equal(anonymousState.status, 401);
 
-    const invalidResponse = await fetch(`${server.baseUrl}/api/state`, {
-      method: "PUT",
+    const invalidRegistration = await fetch(`${server.baseUrl}/api/auth/register`, {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ state: { boardsByProject: {} } }),
+      body: JSON.stringify({ email: "broken@example.com", name: "Bad", password: "short" }),
     });
-    assert.equal(invalidResponse.status, 400);
+    assert.equal(invalidRegistration.status, 400);
+    const crossOriginRegistration = await fetch(`${server.baseUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: "https://attacker.example" },
+      body: JSON.stringify({ email: "attacker@example.com", name: "Attacker", password: "a-secure-password" }),
+    });
+    assert.equal(crossOriginRegistration.status, 403);
 
-    const saveResponse = await fetch(`${server.baseUrl}/api/state`, {
-      method: "PUT",
+    const registrationA = await fetch(`${server.baseUrl}/api/auth/register`, {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ state }),
+      body: JSON.stringify({ email: "A@example.com", name: "Пользователь A", password: "a-secure-password" }),
     });
-    assert.equal(saveResponse.status, 200);
-    assert.deepEqual(await saveResponse.json(), { saved: true });
+    assert.equal(registrationA.status, 201);
+    const cookieA = registrationA.headers.get("set-cookie")?.split(";")[0];
+    assert.match(registrationA.headers.get("set-cookie") ?? "", /HttpOnly/);
+    assert.match(registrationA.headers.get("set-cookie") ?? "", /SameSite=Lax/);
+    assert.ok(cookieA);
+    const accountA = await registrationA.json();
+    assert.equal(accountA.user.email, "a@example.com");
 
-    const readResponse = await fetch(`${server.baseUrl}/api/state`);
-    assert.deepEqual((await readResponse.json()).state, state);
+    const migratedState = await fetch(`${server.baseUrl}/api/state`, { headers: { Cookie: cookieA } });
+    assert.deepEqual((await migratedState.json()).state, legacyState);
+    const saveA = await fetch(`${server.baseUrl}/api/state`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Cookie: cookieA },
+      body: JSON.stringify({ state: userAState }),
+    });
+    assert.equal(saveA.status, 200);
+
+    const duplicateEmail = await fetch(`${server.baseUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "a@example.com", name: "Повтор", password: "a-secure-password" }),
+    });
+    assert.equal(duplicateEmail.status, 409);
+
+    const registrationB = await fetch(`${server.baseUrl}/api/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "b@example.com", name: "Пользователь B", password: "another-secure-password" }),
+    });
+    assert.equal(registrationB.status, 201);
+    const cookieB = registrationB.headers.get("set-cookie")?.split(";")[0];
+    assert.ok(cookieB);
+    const emptyStateB = await fetch(`${server.baseUrl}/api/state`, { headers: { Cookie: cookieB } });
+    assert.equal((await emptyStateB.json()).state, null);
+
+    const saveB = await fetch(`${server.baseUrl}/api/state`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Cookie: cookieB },
+      body: JSON.stringify({ state: userBState }),
+    });
+    assert.equal(saveB.status, 200);
+    const readA = await fetch(`${server.baseUrl}/api/state`, { headers: { Cookie: cookieA } });
+    assert.deepEqual((await readA.json()).state, userAState);
+    const readB = await fetch(`${server.baseUrl}/api/state`, { headers: { Cookie: cookieB } });
+    assert.deepEqual((await readB.json()).state, userBState);
+
+    const badLogin = await fetch(`${server.baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "a@example.com", password: "wrong-password" }),
+    });
+    assert.equal(badLogin.status, 401);
+    const loginA = await fetch(`${server.baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "A@example.com", password: "a-secure-password" }),
+    });
+    assert.equal(loginA.status, 200);
+    const reloginCookieA = loginA.headers.get("set-cookie")?.split(";")[0];
+    assert.ok(reloginCookieA);
+
+    const logoutB = await fetch(`${server.baseUrl}/api/auth/logout`, {
+      method: "POST",
+      headers: { Cookie: cookieB },
+    });
+    assert.equal(logoutB.status, 200);
+    const revokedStateB = await fetch(`${server.baseUrl}/api/state`, { headers: { Cookie: cookieB } });
+    assert.equal(revokedStateB.status, 401);
 
     await stopServer(server.child);
     server = await startServer(databasePath, port);
-
-    const afterRestartResponse = await fetch(`${server.baseUrl}/api/state`);
-    assert.deepEqual((await afterRestartResponse.json()).state, state);
+    const afterRestartResponse = await fetch(`${server.baseUrl}/api/state`, { headers: { Cookie: reloginCookieA } });
+    assert.deepEqual((await afterRestartResponse.json()).state, userAState);
   } finally {
     await stopServer(server.child);
     await rm(tempDirectory, { recursive: true, force: true });

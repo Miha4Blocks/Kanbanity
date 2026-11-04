@@ -23,6 +23,22 @@ button, input, textarea, select { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid #bcb5ff; outline-offset: 2px; }
 
+.auth-page { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(ellipse at 50% 0, #f1efff 0, #f8f9fc 55%); }
+.auth-card { width: min(420px, 100%); padding: 34px; border: 1px solid #ececf2; border-radius: 16px; background: white; box-shadow: 0 18px 55px rgba(37, 38, 56, .08); }
+.auth-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 30px; color: #28283b; font-family: Manrope, sans-serif; font-size: 19px; font-weight: 800; letter-spacing: -.8px; }
+.auth-card > .eyebrow { color: #7669d7; font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+.auth-card h1 { margin: 8px 0 7px; color: #28293b; font-family: Manrope, sans-serif; font-size: 24px; letter-spacing: -.6px; }
+.auth-card > p { margin: 0 0 22px; color: #8a8c9a; font-size: 12px; line-height: 1.6; }
+.auth-field { display: flex; flex-direction: column; gap: 7px; margin: 15px 0; color: #626477; font-size: 11px; font-weight: 600; }
+.auth-field input { width: 100%; height: 42px; padding: 0 11px; border: 1px solid #e8e8ef; border-radius: 8px; background: #fdfdfe; color: #3e4053; font-size: 12px; }
+.auth-field small { min-height: 12px; color: #999baa; font-size: 9px; font-weight: 400; }
+.auth-submit { width: 100%; height: 42px; margin-top: 9px; border: 0; border-radius: 8px; background: #7568e8; color: white; cursor: pointer; font-size: 12px; font-weight: 700; }
+.auth-submit:hover:not(:disabled) { background: #6658d5; }
+.auth-submit:disabled { cursor: wait; opacity: .7; }
+.auth-error { margin: 12px 0; padding: 10px 11px; border: 1px solid #f4d8d1; border-radius: 7px; background: #fff6f3; color: #b94f42; font-size: 11px; line-height: 1.5; }
+.auth-switch { display: flex; justify-content: center; gap: 5px; margin-top: 18px; color: #898b99; font-size: 10px; }
+.auth-switch button { padding: 0; border: 0; background: transparent; color: #6a5dde; cursor: pointer; font-size: inherit; font-weight: 700; }
+
 .app-shell { display: flex; min-height: 100vh; background: #f8f9fc; }
 .sidebar { width: 252px; flex: 0 0 252px; display: flex; flex-direction: column; padding: 23px 15px 16px; background: #fff; border-right: 1px solid #ededf2; }
 .brand { display: flex; align-items: center; gap: 10px; height: 34px; margin: 0 8px 27px; color: #28283b; text-decoration: none; font-family: Manrope, sans-serif; font-size: 19px; font-weight: 800; letter-spacing: -.8px; }

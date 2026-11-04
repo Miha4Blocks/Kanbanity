@@ -48,6 +48,7 @@ type Task = {
 type Column = { id: string; title: string; accent: string; limit?: number };
 type ActivityItem = { id: string; message: string; time: string };
 type Project = { id: string; name: string; icon: string; color: string; description: string; schedule: string; prefix: string };
+type AuthUser = { id: string; email: string; name: string };
 type ProjectBoard = { columns: Column[]; tasksByColumn: Record<string, Task[]> };
 type WorkspaceSettings = { name: string; description: string };
 type PersistedAppState = {
@@ -197,9 +198,6 @@ const initialProjects: Project[] = [
   { id: "content", name: "Контент-маркетинг", icon: "◌", color: "blue", description: "Планируем и создаём полезный контент", schedule: "1 ноя — 30 ноя, 2026", prefix: "CNT" },
 ];
 
-const workspaceSettingsKey = "kanbanity.workspace-settings.v1";
-const projectBoardsKey = "kanbanity.project-boards.v1";
-
 function createProjectTasks(prefix: string, titles: string[]): Record<string, Task[]> {
   let taskNumber = 1;
   return Object.fromEntries(
@@ -224,8 +222,8 @@ function createProjectTasks(prefix: string, titles: string[]): Record<string, Ta
 function createInitialBoards(): Record<string, ProjectBoard> {
   return {
     redesign: {
-      columns: readStorage(storageKeys.columns, initialColumns),
-      tasksByColumn: readStorage(storageKeys.tasks, initialTasks),
+      columns: initialColumns,
+      tasksByColumn: initialTasks,
     },
     mobile: {
       columns: initialColumns,
@@ -274,23 +272,6 @@ const priorityMeta: Record<Priority, { className: string; icon: typeof Flag }> =
   Низкий: { className: "low", icon: ArrowDown },
 };
 
-const storageKeys = {
-  columns: "kanbanity.columns.v1",
-  tasks: "kanbanity.tasks.v1",
-  activity: "kanbanity.activity.v1",
-  readNotifications: "kanbanity.read-notifications.v1",
-};
-
-function readStorage<T>(key: string, fallback: T): T {
-  try {
-    const stored = localStorage.getItem(key);
-    return stored ? (JSON.parse(stored) as T) : fallback;
-  } catch (error) {
-    console.error(`Не удалось загрузить сохранённые данные Kanbanity (${key})`, error);
-    return fallback;
-  }
-}
-
 function getPerson(name: string) {
   return people.find((person) => person.name === name) ?? { name, initials: name.slice(0, 2).toUpperCase() || "—", color: "blue" };
 }
@@ -322,18 +303,15 @@ function createId() {
 }
 
 function App() {
+  const [authStatus, setAuthStatus] = useState<"checking" | "signedOut" | "signedIn">("checking");
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [authError, setAuthError] = useState("");
   const [activeProjectId, setActiveProjectId] = useState("redesign");
   const [projects, setProjects] = useState<Project[]>(initialProjects);
-  const [boardsByProject, setBoardsByProject] = useState<Record<string, ProjectBoard>>(() =>
-    readStorage(projectBoardsKey, createInitialBoards()),
-  );
-  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings>(() =>
-    readStorage(workspaceSettingsKey, { name: "Studio North", description: "Рабочее пространство" }),
-  );
-  const [activity, setActivity] = useState<ActivityItem[]>(() => readStorage(storageKeys.activity, initialActivity));
-  const [readNotificationIds, setReadNotificationIds] = useState<string[]>(() =>
-    readStorage(storageKeys.readNotifications, []),
-  );
+  const [boardsByProject, setBoardsByProject] = useState<Record<string, ProjectBoard>>(createInitialBoards);
+  const [workspaceSettings, setWorkspaceSettings] = useState<WorkspaceSettings>({ name: "Studio North", description: "Рабочее пространство" });
+  const [activity, setActivity] = useState<ActivityItem[]>(initialActivity);
+  const [readNotificationIds, setReadNotificationIds] = useState<string[]>([]);
   const [databaseReady, setDatabaseReady] = useState(false);
   const [databaseStatus, setDatabaseStatus] = useState<DatabaseStatus>("connecting");
   const [databaseError, setDatabaseError] = useState("");
@@ -360,36 +338,67 @@ function App() {
 
   useEffect(() => {
     let active = true;
+    async function restoreSession() {
+      try {
+        const response = await fetch("/api/auth/session");
+        if (!response.ok) throw new Error(`Не удалось подключиться к базе данных (HTTP ${response.status})`);
+        if (!active) return;
+        const result = (await response.json()) as { user: AuthUser | null };
+        setCurrentUser(result.user);
+        setAuthStatus(result.user ? "signedIn" : "signedOut");
+      } catch (error) {
+        console.error("Не удалось восстановить сессию Kanbanity:", error);
+        if (!active) return;
+        setAuthError(error instanceof Error ? error.message : "Не удалось подключиться к серверу");
+        setAuthStatus("signedOut");
+      }
+    }
+
+    void restoreSession();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authStatus !== "signedIn" || !currentUser) return;
+    let active = true;
     setDatabaseReady(false);
     setDatabaseStatus("connecting");
     setDatabaseError("");
 
-    async function initializeDatabase() {
+    async function loadUserState() {
       try {
         const response = await fetch("/api/state");
-        if (!response.ok) throw new Error(`Не удалось подключиться к базе данных (HTTP ${response.status})`);
+        if (response.status === 401) {
+          if (active) {
+            setCurrentUser(null);
+            setAuthStatus("signedOut");
+          }
+          return;
+        }
+        if (!response.ok) throw new Error(`Не удалось загрузить данные (HTTP ${response.status})`);
         const result = (await response.json()) as { state: PersistedAppState | null };
         let state = result.state;
 
         if (!state) {
           state = {
             projects: initialProjects,
-            boardsByProject: readStorage(projectBoardsKey, createInitialBoards()),
-            workspaceSettings: readStorage(workspaceSettingsKey, { name: "Studio North", description: "Рабочее пространство" }),
-            activity: readStorage(storageKeys.activity, initialActivity),
-            readNotificationIds: readStorage(storageKeys.readNotifications, []),
+            boardsByProject: createInitialBoards(),
+            workspaceSettings: { name: "Studio North", description: "Рабочее пространство" },
+            activity: initialActivity,
+            readNotificationIds: [],
           };
           const seedResponse = await fetch("/api/state", {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ state }),
           });
-          if (!seedResponse.ok) throw new Error(`Не удалось перенести данные в базу (HTTP ${seedResponse.status})`);
+          if (!seedResponse.ok) throw new Error(`Не удалось создать данные аккаунта (HTTP ${seedResponse.status})`);
         }
 
         if (!active) return;
-        const loadedProjects = state.projects ?? initialProjects;
-        setProjects(loadedProjects);
+        setProjects(state.projects ?? initialProjects);
         setBoardsByProject(state.boardsByProject);
         setWorkspaceSettings(state.workspaceSettings);
         setActivity(state.activity);
@@ -399,16 +408,16 @@ function App() {
       } catch (error) {
         console.error("Не удалось загрузить данные Kanbanity из SQLite:", error);
         if (!active) return;
-        setDatabaseError(error instanceof Error ? error.message : "Не удалось подключиться к базе данных");
+        setDatabaseError(error instanceof Error ? error.message : "Не удалось загрузить данные");
         setDatabaseStatus("error");
       }
     }
 
-    void initializeDatabase();
+    void loadUserState();
     return () => {
       active = false;
     };
-  }, [databaseRetry]);
+  }, [authStatus, currentUser?.id, databaseRetry]);
 
   useEffect(() => {
     if (!databaseReady) return;
@@ -440,9 +449,6 @@ function App() {
     };
   }, [databaseReady, projects, boardsByProject, workspaceSettings, activity, readNotificationIds, databaseRetry]);
 
-  useEffect(() => {
-    localStorage.setItem(storageKeys.readNotifications, JSON.stringify(readNotificationIds));
-  }, [readNotificationIds]);
   useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(""), 3000);
@@ -583,6 +589,26 @@ function App() {
   function retryDatabaseConnection() {
     setDatabaseReady(false);
     setDatabaseRetry((attempt) => attempt + 1);
+  }
+
+  function onAuthenticated(user: AuthUser) {
+    setCurrentUser(user);
+    setAuthError("");
+    setDatabaseReady(false);
+    setAuthStatus("signedIn");
+  }
+
+  async function logout() {
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST" });
+      if (!response.ok) throw new Error(`Не удалось выйти из аккаунта (HTTP ${response.status})`);
+      setDatabaseReady(false);
+      setCurrentUser(null);
+      setAuthStatus("signedOut");
+    } catch (error) {
+      console.error("Не удалось завершить сессию Kanbanity:", error);
+      setToast(error instanceof Error ? error.message : "Не удалось выйти из аккаунта");
+    }
   }
 
   function openNotifications() {
@@ -786,6 +812,13 @@ function App() {
 
   const isEmptyFilter = query || priorityFilter !== "Все приоритеты" || assigneeFilter !== "Все исполнители" || labelFilter !== "Все метки";
 
+  if (authStatus === "checking") {
+    return <main className="auth-page"><div className="auth-card"><span className="brand"><span className="brand-mark"><span /><span /><span /></span><span>kanbanity</span></span><p>Проверяем сессию...</p></div></main>;
+  }
+  if (authStatus === "signedOut" || !currentUser) {
+    return <AuthScreen onAuthenticated={onAuthenticated} initialError={authError} />;
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -817,8 +850,8 @@ function App() {
           </div>
           <NavButton icon={<CircleHelp size={17} />} label="Помощь и поддержка" onClick={() => setToast("Центр помощи Kanbanity")} />
           <NavButton icon={<Settings2 size={17} />} label="Настройки" onClick={() => setShowWorkspaceSettings(true)} />
-          <button className="profile-switch" onClick={() => setToast("Аккаунт Дмитрий Волков")}>
-            <span className="avatar blue">ДВ</span><span><strong>Дмитрий Волков</strong><small>Бесплатный план</small></span><MoreHorizontal size={18} />
+          <button className="profile-switch" onClick={() => void logout()} aria-label={`Выйти из аккаунта ${currentUser.email}`}>
+            <span className="avatar blue">{currentUser.name.slice(0, 2).toUpperCase()}</span><span><strong>{currentUser.name}</strong><small>{currentUser.email} · Выйти</small></span><MoreHorizontal size={18} />
           </button>
         </div>
       </aside>
@@ -839,7 +872,7 @@ function App() {
                 <footer className="notification-panel-footer"><button onClick={markAllNotificationsRead} disabled={unreadNotificationCount === 0}>Отметить все прочитанными</button><button onClick={() => { setShowNotifications(false); setActiveNav("Доска проекта"); setActiveView("Активность"); }}>Вся активность <ChevronRight size={14} /></button></footer>
               </section>}
             </div>
-            <button className="top-avatar avatar blue" onClick={() => setToast("Аккаунт Дмитрий Волков")}>ДВ</button>
+            <button className="top-avatar avatar blue" aria-label={`Выйти из аккаунта ${currentUser.email}`} onClick={() => void logout()}>{currentUser.name.slice(0, 2).toUpperCase()}</button>
           </div>
         </header>
 
@@ -981,6 +1014,65 @@ function App() {
       {modalTask && activeNav === "Доска проекта" && <TaskModal key={modalTask.id || "new"} task={modalTask} columns={columns} initialColumnId={modalColumnId ?? columns[0]?.id ?? ""} onClose={() => { setModalTask(null); setModalColumnId(null); }} onSave={saveTask} onDelete={modalTask.id ? () => removeTask(modalTask.id) : undefined} onAddComment={addComment} />}
       {toast && <div className="toast"><Check size={16} />{toast}<button aria-label="Закрыть уведомление" onClick={() => setToast("")}><X size={14} /></button></div>}
     </div>
+  );
+}
+
+function AuthScreen({ onAuthenticated, initialError }: {
+  onAuthenticated: (user: AuthUser) => void;
+  initialError: string;
+}) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [error, setError] = useState(initialError);
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    const formData = new FormData(event.currentTarget);
+    const body = {
+      name: String(formData.get("name") ?? ""),
+      email: String(formData.get("email") ?? ""),
+      password: String(formData.get("password") ?? ""),
+    };
+
+    try {
+      const response = await fetch(`/api/auth/${mode === "register" ? "register" : "login"}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const result = (await response.json()) as { user?: AuthUser; error?: string };
+      if (!response.ok || !result.user) throw new Error(result.error ?? "Не удалось выполнить вход");
+      onAuthenticated(result.user);
+    } catch (submitError) {
+      console.error("Ошибка авторизации Kanbanity:", submitError);
+      setError(submitError instanceof Error ? submitError.message : "Не удалось связаться с сервером");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="auth-page">
+      <form className="auth-card" onSubmit={submit}>
+        <div className="auth-brand"><span className="brand-mark"><span /><span /><span /></span><span>kanbanity</span></div>
+        <span className="eyebrow">ВАШЕ РАБОЧЕЕ ПРОСТРАНСТВО</span>
+        <h1>{mode === "login" ? "С возвращением" : "Создать аккаунт"}</h1>
+        <p>{mode === "login" ? "Войдите, чтобы продолжить работу над проектами." : "Зарегистрируйтесь — ваши проекты будут доступны только вам."}</p>
+        {mode === "register" && <label className="auth-field"><span>Имя</span><input name="name" autoComplete="name" maxLength={60} required /></label>}
+        <label className="auth-field"><span>Email</span><input name="email" type="email" autoComplete="email" maxLength={254} required /></label>
+        <label className="auth-field"><span>Пароль</span><input name="password" type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} minLength={mode === "register" ? 10 : undefined} maxLength={128} required /><small>{mode === "register" ? "Не менее 10 символов" : ""}</small></label>
+        {error && <div className="auth-error" role="alert">{error}</div>}
+        <button className="auth-submit" type="submit" disabled={busy}>{busy ? "Подождите..." : mode === "login" ? "Войти" : "Зарегистрироваться"}</button>
+        <div className="auth-switch">
+          {mode === "login" ? "Ещё нет аккаунта?" : "Уже есть аккаунт?"}
+          <button type="button" onClick={() => { setError(""); setMode((current) => current === "login" ? "register" : "login"); }}>
+            {mode === "login" ? "Регистрация" : "Войти"}
+          </button>
+        </div>
+      </form>
+    </main>
   );
 }
 

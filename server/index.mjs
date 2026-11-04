@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { DatabaseSync } from "node:sqlite";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, stat } from "node:fs/promises";
 import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +11,10 @@ const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? "127.0.0.1";
 const distDirectory = resolve(rootDirectory, "dist");
 const maxRequestBytes = 25 * 1024 * 1024;
+const sessionLifetimeMs = 30 * 24 * 60 * 60 * 1000;
+const authAttemptLimit = 10;
+const authAttemptWindowMs = 15 * 60 * 1000;
+const authAttempts = new Map();
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -29,6 +34,24 @@ database.exec(`
   PRAGMA foreign_keys = ON;
   CREATE TABLE IF NOT EXISTS app_state (
     id INTEGER PRIMARY KEY CHECK (id = 1),
+    state_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL,
+    password_salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS auth_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS user_app_state (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     state_json TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
@@ -109,6 +132,94 @@ async function readJsonBody(request) {
   }
 }
 
+function getSessionToken(request) {
+  const cookie = request.headers.cookie ?? "";
+  const sessionCookie = cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith("kanbanity_session="));
+  const token = sessionCookie?.slice("kanbanity_session=".length);
+  return token && /^[a-f0-9]{64}$/.test(token) ? token : null;
+}
+
+function getAuthenticatedUser(request) {
+  const token = getSessionToken(request);
+  if (!token) return null;
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const row = database.prepare(
+    `SELECT users.id, users.email, users.display_name
+     FROM auth_sessions
+     JOIN users ON users.id = auth_sessions.user_id
+     WHERE auth_sessions.token_hash = ? AND auth_sessions.expires_at > ?`,
+  ).get(tokenHash, new Date().toISOString());
+  if (!row) return null;
+  return { id: row.id, email: row.email, name: row.display_name };
+}
+
+function setSessionCookie(request, response, token) {
+  const host = request.headers.host ?? "";
+  const secure = process.env.NODE_ENV === "production" ||
+    request.headers["x-forwarded-proto"]?.split(",")[0].trim() === "https" ||
+    !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  response.setHeader(
+    "Set-Cookie",
+    `kanbanity_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${Math.floor(sessionLifetimeMs / 1000)}${secure ? "; Secure" : ""}`,
+  );
+}
+
+function clearSessionCookie(request, response) {
+  const host = request.headers.host ?? "";
+  const secure = process.env.NODE_ENV === "production" ||
+    request.headers["x-forwarded-proto"]?.split(",")[0].trim() === "https" ||
+    !/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  response.setHeader(
+    "Set-Cookie",
+    `kanbanity_session=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`,
+  );
+}
+
+function isSameOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === request.headers.host;
+  } catch {
+    return false;
+  }
+}
+
+function checkAuthRateLimit(request) {
+  const now = Date.now();
+  const address = request.socket.remoteAddress ?? "unknown";
+  const attempts = (authAttempts.get(address) ?? []).filter((timestamp) => now - timestamp < authAttemptWindowMs);
+  if (attempts.length >= authAttemptLimit) {
+    authAttempts.set(address, attempts);
+    return false;
+  }
+  attempts.push(now);
+  authAttempts.set(address, attempts);
+  if (authAttempts.size > 1000) {
+    for (const [key, timestamps] of authAttempts) {
+      if (timestamps.every((timestamp) => now - timestamp >= authAttemptWindowMs)) authAttempts.delete(key);
+    }
+  }
+  return true;
+}
+
+function createSession(request, response, userId) {
+  const token = randomBytes(32).toString("hex");
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const expiresAt = new Date(Date.now() + sessionLifetimeMs).toISOString();
+  database.prepare("INSERT INTO auth_sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)").run(tokenHash, userId, expiresAt);
+  database.prepare("DELETE FROM auth_sessions WHERE expires_at <= ?").run(new Date().toISOString());
+  setSessionCookie(request, response, token);
+}
+
+function normalizeEmail(value) {
+  return value.trim().toLowerCase();
+}
+
+function isValidEmail(value) {
+  return value.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
 async function serveStaticFile(requestPath, response) {
   let decodedPath;
   try {
@@ -154,8 +265,116 @@ const server = createServer((request, response) => {
       return;
     }
 
+    if (requestUrl.pathname === "/api/auth/session" && request.method === "GET") {
+      database.prepare("DELETE FROM auth_sessions WHERE expires_at <= ?").run(new Date().toISOString());
+      respondJson(response, 200, { user: getAuthenticatedUser(request) });
+      return;
+    }
+
+    if (
+      (requestUrl.pathname === "/api/auth/register" || requestUrl.pathname === "/api/auth/login") &&
+      request.method === "POST"
+    ) {
+      if (!isSameOrigin(request)) {
+        respondJson(response, 403, { error: "Запрос отклонён" });
+        return;
+      }
+      if (!checkAuthRateLimit(request)) {
+        respondJson(response, 429, { error: "Слишком много попыток. Попробуйте позже." });
+        return;
+      }
+
+      const body = await readJsonBody(request);
+      if (!isRecord(body)) {
+        respondJson(response, 400, { error: "Некорректные данные запроса" });
+        return;
+      }
+      const email = normalizeEmail(typeof body.email === "string" ? body.email : "");
+      const password = typeof body.password === "string" ? body.password : "";
+
+      if (requestUrl.pathname === "/api/auth/register") {
+        const name = typeof body.name === "string" ? body.name.trim() : "";
+        if (!isValidEmail(email) || password.length < 10 || password.length > 128 || name.length < 1 || name.length > 60) {
+          respondJson(response, 400, { error: "Укажите имя, корректный email и пароль длиной от 10 до 128 символов" });
+          return;
+        }
+
+        const userId = randomBytes(16).toString("hex");
+        const salt = randomBytes(16).toString("hex");
+        const passwordHash = scryptSync(password, salt, 64).toString("hex");
+        try {
+          database.exec("BEGIN IMMEDIATE");
+          if (database.prepare("SELECT 1 FROM users WHERE email = ?").get(email)) {
+            database.exec("ROLLBACK");
+            respondJson(response, 409, { error: "Аккаунт с таким email уже существует" });
+            return;
+          }
+
+          database.prepare(
+            "INSERT INTO users (id, email, display_name, password_salt, password_hash) VALUES (?, ?, ?, ?, ?)",
+          ).run(userId, email, name, salt, passwordHash);
+
+          const userCount = database.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+          const legacyState = userCount === 1
+            ? database.prepare("SELECT state_json FROM app_state WHERE id = 1").get()
+            : null;
+          if (legacyState) {
+            database.prepare("INSERT INTO user_app_state (user_id, state_json) VALUES (?, ?)").run(userId, legacyState.state_json);
+          }
+          createSession(request, response, userId);
+          database.exec("COMMIT");
+        } catch (error) {
+          database.exec("ROLLBACK");
+          throw error;
+        }
+
+        respondJson(response, 201, { user: { id: userId, email, name } });
+        return;
+      }
+
+      if (!isValidEmail(email) || password.length > 128) {
+        respondJson(response, 400, { error: "Введите корректные email и пароль" });
+        return;
+      }
+      const row = database.prepare(
+        "SELECT id, email, display_name, password_salt, password_hash FROM users WHERE email = ?",
+      ).get(email);
+      const salt = row?.password_salt ?? "00000000000000000000000000000000";
+      const expectedHash = row?.password_hash ?? "00".repeat(64);
+      const actualHash = scryptSync(password, salt, 64);
+      const passwordMatches = timingSafeEqual(actualHash, Buffer.from(expectedHash, "hex"));
+      if (!row || !passwordMatches) {
+        respondJson(response, 401, { error: "Неверный email или пароль" });
+        return;
+      }
+
+      createSession(request, response, row.id);
+      respondJson(response, 200, { user: { id: row.id, email: row.email, name: row.display_name } });
+      return;
+    }
+
+    if (requestUrl.pathname === "/api/auth/logout" && request.method === "POST") {
+      if (!isSameOrigin(request)) {
+        respondJson(response, 403, { error: "Запрос отклонён" });
+        return;
+      }
+      const token = getSessionToken(request);
+      if (token) {
+        database.prepare("DELETE FROM auth_sessions WHERE token_hash = ?")
+          .run(createHash("sha256").update(token).digest("hex"));
+      }
+      clearSessionCookie(request, response);
+      respondJson(response, 200, { loggedOut: true });
+      return;
+    }
+
     if (requestUrl.pathname === "/api/state" && request.method === "GET") {
-      const row = database.prepare("SELECT state_json, updated_at FROM app_state WHERE id = 1").get();
+      const user = getAuthenticatedUser(request);
+      if (!user) {
+        respondJson(response, 401, { error: "Требуется авторизация" });
+        return;
+      }
+      const row = database.prepare("SELECT state_json, updated_at FROM user_app_state WHERE user_id = ?").get(user.id);
       respondJson(response, 200, {
         state: row ? JSON.parse(row.state_json) : null,
         updatedAt: row?.updated_at ?? null,
@@ -164,6 +383,15 @@ const server = createServer((request, response) => {
     }
 
     if (requestUrl.pathname === "/api/state" && request.method === "PUT") {
+      if (!isSameOrigin(request)) {
+        respondJson(response, 403, { error: "Запрос отклонён" });
+        return;
+      }
+      const user = getAuthenticatedUser(request);
+      if (!user) {
+        respondJson(response, 401, { error: "Требуется авторизация" });
+        return;
+      }
       const body = await readJsonBody(request);
       if (!isRecord(body) || !isAppState(body.state)) {
         respondJson(response, 400, { error: "Структура состояния приложения некорректна" });
@@ -173,13 +401,13 @@ const server = createServer((request, response) => {
       const stateJson = JSON.stringify(body.state);
       database
         .prepare(
-          `INSERT INTO app_state (id, state_json, updated_at)
-           VALUES (1, ?, CURRENT_TIMESTAMP)
-           ON CONFLICT(id) DO UPDATE SET
+          `INSERT INTO user_app_state (user_id, state_json, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(user_id) DO UPDATE SET
              state_json = excluded.state_json,
              updated_at = excluded.updated_at`,
         )
-        .run(stateJson);
+        .run(user.id, stateJson);
       respondJson(response, 200, { saved: true });
       return;
     }

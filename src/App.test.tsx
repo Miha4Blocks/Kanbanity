@@ -12,6 +12,7 @@ type TestPersistedState = {
 };
 
 let persistedDatabaseState: TestPersistedState | null;
+let mockedUser: { id: string; email: string; name: string } | null;
 
 function apiResponse(payload: unknown): Response {
   return {
@@ -56,11 +57,23 @@ describe("Kanbanity", () => {
   beforeEach(() => {
     localStorage.clear();
     persistedDatabaseState = null;
+    mockedUser = { id: "test-user", email: "test@example.com", name: "Test User" };
     vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(_input);
       if (init?.method === "PUT") {
         const body = JSON.parse(String(init.body)) as { state: TestPersistedState };
         persistedDatabaseState = body.state;
         return apiResponse({ saved: true });
+      }
+      if (path === "/api/auth/session") return apiResponse({ user: mockedUser });
+      if (path === "/api/auth/logout") {
+        mockedUser = null;
+        return apiResponse({ loggedOut: true });
+      }
+      if (path === "/api/auth/login" || path === "/api/auth/register") {
+        const body = JSON.parse(String(init?.body)) as { email: string; name?: string };
+        mockedUser = { id: "test-user", email: body.email, name: body.name ?? "Test User" };
+        return apiResponse({ user: mockedUser });
       }
       return apiResponse({ state: persistedDatabaseState, updatedAt: null });
     }));
@@ -105,35 +118,22 @@ describe("Kanbanity", () => {
     expect(getTaskCard("Проверить новый сценарий")).toBeInTheDocument();
   });
 
-  it("переносит существующие данные из localStorage в базу при первом запуске", async () => {
-    localStorage.setItem(
-      "kanbanity.project-boards.v1",
-      JSON.stringify({
-        redesign: {
-          columns: [{ id: "backlog", title: "К выполнению", accent: "#8b91a1" }],
-          tasksByColumn: {
-            backlog: [{
-              id: "LEG-1",
-              title: "Старая сохранённая задача",
-              description: "",
-              priority: "Средний",
-              assignee: "",
-              dueDate: "",
-              labels: [],
-              comments: [],
-            }],
-          },
-        },
-      }),
-    );
-
+  it("показывает вход и возвращается к приватной доске после авторизации", async () => {
+    const user = userEvent.setup();
+    mockedUser = null;
     render(<App />);
-    expect(await screen.findByText("Старая сохранённая задача")).toBeInTheDocument();
-    await waitFor(() =>
-      expect(persistedDatabaseState?.boardsByProject.redesign.tasksByColumn.backlog).toEqual([
-        expect.objectContaining({ id: "LEG-1", title: "Старая сохранённая задача" }),
-      ]),
-    );
+
+    expect(await screen.findByRole("heading", { name: "С возвращением" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Регистрация" }));
+    await user.type(screen.getByLabelText("Имя"), "Новый пользователь");
+    await user.type(screen.getByLabelText("Email"), "new@example.com");
+    await user.type(screen.getByLabelText(/Пароль/), "a-secure-password");
+    await user.click(screen.getByRole("button", { name: "Зарегистрироваться" }));
+
+    expect(await screen.findByRole("heading", { name: "Редизайн платформы" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /Выйти из аккаунта new@example\.com/ })).toHaveLength(2);
+    await user.click(screen.getAllByRole("button", { name: /Выйти из аккаунта new@example\.com/ })[0]);
+    expect(await screen.findByRole("heading", { name: "С возвращением" })).toBeInTheDocument();
   });
 
   it("редактирует задачу и удаляет её", async () => {
