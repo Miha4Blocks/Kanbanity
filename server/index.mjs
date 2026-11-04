@@ -50,6 +50,19 @@ function isRecord(value) {
 function isAppState(value) {
   return (
     isRecord(value) &&
+    (value.projects === undefined ||
+      (Array.isArray(value.projects) &&
+        value.projects.every(
+          (project) =>
+            isRecord(project) &&
+            typeof project.id === "string" &&
+            typeof project.name === "string" &&
+            typeof project.icon === "string" &&
+            ["purple", "orange", "blue"].includes(project.color) &&
+            typeof project.description === "string" &&
+            typeof project.schedule === "string" &&
+            typeof project.prefix === "string",
+        ))) &&
     isRecord(value.boardsByProject) &&
     Object.values(value.boardsByProject).every(
       (board) =>

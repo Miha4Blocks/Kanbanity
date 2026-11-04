@@ -169,6 +169,8 @@ h1, h2, h3, p { margin-top: 0; }
 .column-controls .icon-button { color: #9b9dab; }
 .task-list { min-height: 85px; display: flex; flex-direction: column; gap: 9px; padding: 1px 2px 8px; border-radius: 10px; transition: background .15s; }
 .task-list.drop-ready { background: rgba(117, 104, 232, .04); }
+.task-list-toggle { min-height: 32px; border: 0; border-radius: 7px; background: transparent; color: #7569d7; cursor: pointer; text-align: left; font-size: 10px; font-weight: 600; }
+.task-list-toggle:hover { background: #f0effa; color: #5f53c4; }
 .task-card { width: 100%; display: block; padding: 12px 12px 10px; border: 1px solid #ececf1; border-radius: 10px; background: #fff; box-shadow: 0 2px 5px rgba(37, 38, 56, .025); cursor: grab; text-align: left; transition: transform .16s, box-shadow .16s, border-color .16s; }
 .task-card:hover { transform: translateY(-2px); border-color: #dedbf3; box-shadow: 0 8px 18px rgba(37, 38, 56, .07); }
 .task-card:active { cursor: grabbing; }
@@ -262,6 +264,10 @@ h1, h2, h3, p { margin-top: 0; }
 .team-card-footer > button { padding: 0; border: 0; background: transparent; color: #7165ce; cursor: pointer; font-size: 9px; }
 .workspace-settings-modal h2 { margin: 4px 0 6px; color: #353649; font-family: Manrope, sans-serif; font-size: 19px; }
 .workspace-settings-modal > p { margin: 0 0 20px; color: #9698a6; font-size: 10px; }
+.create-project-modal { width: min(440px, 100%); padding-bottom: 0; }
+.create-project-modal h2 { margin: 4px 0 6px; color: #353649; font-family: Manrope, sans-serif; font-size: 19px; }
+.create-project-modal > p { margin: 0 0 20px; color: #9698a6; font-size: 10px; }
+.create-project-modal .settings-field small { color: #a5a6b1; font-size: 9px; font-weight: 400; }
 .settings-field { display: flex; flex-direction: column; gap: 7px; margin: 15px 0; color: #717385; font-size: 10px; font-weight: 600; }
 .settings-field input, .settings-field textarea { width: 100%; padding: 10px 11px; border: 1px solid #ebebf0; border-radius: 7px; background: #fdfdfe; color: #4a4b5c; font-size: 10px; resize: vertical; }
 

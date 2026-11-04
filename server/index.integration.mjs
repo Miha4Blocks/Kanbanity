@@ -60,6 +60,15 @@ test("SQLite API сохраняет состояние после перезап
   let server = await startServer(databasePath, port);
 
   const state = {
+    projects: [{
+      id: "redesign",
+      name: "Редизайн платформы",
+      icon: "✳",
+      color: "purple",
+      description: "Новый опыт для пользователей",
+      schedule: "Без срока",
+      prefix: "RED",
+    }],
     boardsByProject: {
       redesign: {
         columns: [{ id: "todo", title: "К выполнению" }],

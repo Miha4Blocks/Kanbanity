@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
 type TestPersistedState = {
+  projects?: Array<{ id: string; name: string; prefix: string }>;
   boardsByProject: Record<string, { columns: unknown[]; tasksByColumn: Record<string, unknown[]> }>;
   workspaceSettings: { name: string; description: string };
   activity: Array<{ id: string; message: string; time: string }>;
@@ -184,6 +185,28 @@ describe("Kanbanity", () => {
     expect(screen.queryByText("Пятая задача")).not.toBeInTheDocument();
   });
 
+  it("сворачивает задачи в колонке после первых четырёх и позволяет раскрыть их", async () => {
+    const user = userEvent.setup();
+    await renderApp();
+
+    await createTask(user, "Четвёртая задача");
+    await createTask(user, "Пятая задача");
+    const backlog = getColumn("К выполнению");
+
+    expect(backlog.getAllByRole("button", { name: /KAN-/ })).toHaveLength(4);
+    expect(backlog.queryByRole("button", { name: /Пятая задача/ })).not.toBeInTheDocument();
+    expect(backlog.getByRole("button", { name: "Показать ещё 1 задачу" })).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(backlog.getByRole("button", { name: "Показать ещё 1 задачу" }));
+    expect(backlog.getAllByRole("button", { name: /KAN-/ })).toHaveLength(5);
+    expect(backlog.getByRole("button", { name: /Пятая задача/ })).toBeInTheDocument();
+    expect(backlog.getByRole("button", { name: "Свернуть" })).toHaveAttribute("aria-expanded", "true");
+
+    await user.click(backlog.getByRole("button", { name: "Свернуть" }));
+    expect(backlog.getAllByRole("button", { name: /KAN-/ })).toHaveLength(4);
+    expect(backlog.queryByRole("button", { name: /Пятая задача/ })).not.toBeInTheDocument();
+  });
+
   it("добавляет комментарий к задаче", async () => {
     const user = userEvent.setup();
     await renderApp();
@@ -294,6 +317,36 @@ describe("Kanbanity", () => {
 
     await user.click(screen.getAllByRole("button", { name: /Мобильное приложение/ })[0]);
     expect(getTaskCard("Задача мобильного проекта")).toBeInTheDocument();
+  });
+
+  it("создаёт проект с пустой доской и сохраняет его после повторного открытия", async () => {
+    const user = userEvent.setup();
+    const firstRender = await renderApp();
+
+    await user.click(screen.getByRole("button", { name: "Создать проект" }));
+    await user.type(screen.getByLabelText("Название проекта"), "Новый запуск");
+    await user.type(screen.getByLabelText(/Описание/), "Подготовить запуск продукта");
+    await user.click(within(screen.getByRole("dialog", { name: "Создать проект" })).getByRole("button", { name: "Создать проект" }));
+
+    expect(screen.getByRole("heading", { name: "Новый запуск", level: 1 })).toBeInTheDocument();
+    expect(screen.getByText("Подготовить запуск продукта")).toBeInTheDocument();
+    expect(screen.getAllByText("Перетащите задачу сюда")).toHaveLength(4);
+    await waitFor(() => {
+      expect(persistedDatabaseState?.projects).toContainEqual(expect.objectContaining({
+        name: "Новый запуск",
+        prefix: "PRJ",
+      }));
+      expect(Object.values(persistedDatabaseState?.boardsByProject ?? {}).some((board) =>
+        board.columns.length === 4 && Object.values(board.tasksByColumn).every((tasks) => tasks.length === 0),
+      )).toBe(true);
+    });
+
+    firstRender.unmount();
+    await renderApp();
+    expect(screen.getByRole("button", { name: /Новый запуск/ })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Новый запуск/ }));
+    expect(screen.getByRole("heading", { name: "Новый запуск", level: 1 })).toBeInTheDocument();
+    expect(screen.getAllByText("Перетащите задачу сюда")).toHaveLength(4);
   });
 
   it("сохраняет настройки рабочего пространства и показывает их после повторного открытия", async () => {
