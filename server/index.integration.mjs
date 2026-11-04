@@ -83,6 +83,12 @@ test("SQLite API сохраняет состояние после перезап
   };
 
   try {
+    const pageResponse = await fetch(`${server.baseUrl}/`);
+    assert.equal(pageResponse.status, 200);
+    assert.match(pageResponse.headers.get("cache-control") ?? "", /no-store/);
+    assert.equal(pageResponse.headers.get("pragma"), "no-cache");
+    assert.equal(pageResponse.headers.get("expires"), "0");
+
     const emptyResponse = await fetch(`${server.baseUrl}/api/state`);
     assert.equal(emptyResponse.status, 200);
     assert.equal((await emptyResponse.json()).state, null);
