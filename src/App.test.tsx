@@ -349,6 +349,28 @@ describe("Kanbanity", () => {
     expect(screen.getAllByText("Перетащите задачу сюда")).toHaveLength(4);
   });
 
+  it("использует crypto.getRandomValues, если crypto.randomUUID недоступен", async () => {
+    const user = userEvent.setup();
+    const getRandomValues = vi.fn((bytes: Uint8Array) => {
+      bytes.fill(1);
+      return bytes;
+    });
+    vi.stubGlobal("crypto", { getRandomValues });
+    await renderApp();
+
+    await user.click(screen.getByRole("button", { name: "Создать проект" }));
+    await user.type(screen.getByLabelText("Название проекта"), "Резервная генерация");
+    await user.click(within(screen.getByRole("dialog", { name: "Создать проект" })).getByRole("button", { name: "Создать проект" }));
+
+    await waitFor(() => {
+      expect(persistedDatabaseState?.projects).toContainEqual(expect.objectContaining({
+        id: "01010101-0101-4101-8101-010101010101",
+        name: "Резервная генерация",
+      }));
+      expect(getRandomValues).toHaveBeenCalled();
+    });
+  });
+
   it("сохраняет настройки рабочего пространства и показывает их после повторного открытия", async () => {
     const user = userEvent.setup();
     await renderApp();
